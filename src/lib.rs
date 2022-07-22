@@ -1,4 +1,5 @@
 mod node;
+mod utils;
 
 use crate::node::Node;
 use crossbeam::epoch::{self, Guard};

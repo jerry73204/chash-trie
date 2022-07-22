@@ -1,17 +1,18 @@
 use crossbeam::epoch::{Atomic, Guard, Owned, Shared};
-use dashmap::DashMap;
 use std::borrow::Borrow;
 use std::hash::Hash;
 use std::iter;
 use std::sync::atomic::Ordering::*;
 use std::sync::RwLock;
 
+use crate::utils::{new_map, Map};
+
 #[derive(Debug)]
 pub(crate) struct Node<S, V>
 where
     S: Eq + Hash,
 {
-    pub(crate) children: DashMap<S, Atomic<Node<S, V>>>,
+    pub(crate) children: Map<S, Atomic<Node<S, V>>>,
     pub(crate) value: Atomic<V>,
     pub(crate) is_deleted: RwLock<bool>,
 }
@@ -22,7 +23,7 @@ where
 {
     pub fn new() -> Self {
         Self {
-            children: DashMap::new(),
+            children: new_map(),
             value: Atomic::null(),
             is_deleted: RwLock::new(false),
         }

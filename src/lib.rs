@@ -22,8 +22,8 @@ where
         Self { root: Node::new() }
     }
 
-    pub fn pinned(&self) -> PinnedTrie<'_, S, V> {
-        PinnedTrie {
+    pub fn pin(&self) -> GuardedTrie<'_, S, V> {
+        GuardedTrie {
             guard: epoch::pin(),
             trie: self,
         }
@@ -40,7 +40,7 @@ where
 }
 
 #[derive(Debug)]
-pub struct PinnedTrie<'g, S, V>
+pub struct GuardedTrie<'g, S, V>
 where
     S: Eq + Hash,
 {
@@ -48,7 +48,7 @@ where
     trie: &'g Trie<S, V>,
 }
 
-impl<'g, S, V> PinnedTrie<'g, S, V>
+impl<'g, S, V> GuardedTrie<'g, S, V>
 where
     S: Eq + Hash,
 {

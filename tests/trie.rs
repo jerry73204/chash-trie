@@ -1,10 +1,13 @@
 use fast_trie::Trie;
+use once_cell::sync::Lazy;
 use rand::prelude::*;
 use std::{
     sync::Arc,
-    thread::{sleep, spawn},
+    thread::{available_parallelism, sleep, spawn},
     time::Duration,
 };
+
+static NUM_THREADS: Lazy<usize> = Lazy::new(|| available_parallelism().unwrap().get());
 
 #[test]
 fn concurrent_reader_writer_test() {
@@ -28,19 +31,19 @@ fn concurrent_reader_writer_test() {
             sleep(Duration::from_millis(5));
 
             // 5ms
-            trie.pinned().insert(key.clone(), first_value);
+            trie.pin().insert(key.clone(), first_value);
 
             sleep(Duration::from_millis(10));
 
             // 15ms
-            trie.pinned().insert(key, second_value);
+            trie.pin().insert(key, second_value);
         })
     };
 
     let reader = spawn(move || {
         // 0ms
         {
-            let trie = trie.pinned();
+            let trie = trie.pin();
             let value = trie.get(&key);
             assert!(value.is_none());
         }
@@ -49,7 +52,7 @@ fn concurrent_reader_writer_test() {
 
         // 10ms
         {
-            let value = *trie.pinned().get(&key).unwrap();
+            let value = *trie.pin().get(&key).unwrap();
             assert_eq!(value, first_value);
         }
 
@@ -57,7 +60,7 @@ fn concurrent_reader_writer_test() {
 
         // 20ms
         {
-            let value = *trie.pinned().get(&key).unwrap();
+            let value = *trie.pin().get(&key).unwrap();
             assert_eq!(value, second_value);
         }
     });
@@ -86,12 +89,12 @@ fn overwrite_test() {
 
         spawn(move || {
             // 0ms
-            trie.pinned().insert(key.clone(), first_value);
+            trie.pin().insert(key.clone(), first_value);
 
             sleep(Duration::from_millis(10));
 
             // 10ms
-            trie.pinned().insert(key, second_value);
+            trie.pin().insert(key, second_value);
         })
     };
 
@@ -99,8 +102,8 @@ fn overwrite_test() {
         sleep(Duration::from_millis(5));
 
         // 5ms
-        let pinned = trie.pinned();
-        let value = pinned.get(&key).unwrap();
+        let pin = trie.pin();
+        let value = pin.get(&key).unwrap();
         assert_eq!(*value, first_value);
 
         sleep(Duration::from_millis(10));

@@ -15,7 +15,6 @@ clap = { version = "3.2.14", features = ["derive"] }
 rand = "0.8.5"
 rayon = "1.5.3"
 trie-rs = "0.1.1"
-fnv = "1.0.7"
 
 [feature]
 rayon = ["dashmap/rayon"]

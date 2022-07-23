@@ -44,12 +44,14 @@ fn main() {
             .collect()
     };
 
+    println!("Building the trie concurrently");
     let trie = Arc::new(Trie::new());
 
     dictionary.into_par_iter().for_each(|(key, value)| {
         trie.pin().insert(key, value);
     });
 
+    println!("Run concurrent lookups");
     let since = Instant::now();
     let threads: Vec<_> = (0..num_threads)
         .map(|_| {

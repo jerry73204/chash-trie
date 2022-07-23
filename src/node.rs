@@ -29,7 +29,7 @@ where
         }
     }
 
-    pub fn get<'a, 'g, Q, K>(&'g self, key: K, guard: &'g Guard) -> Option<&'g V>
+    pub fn get<'a, 'g, Q, K>(&self, key: K, guard: &'g Guard) -> Option<&'g V>
     where
         K: IntoIterator<Item = &'a Q>,
         S: Borrow<Q>,
@@ -65,7 +65,7 @@ where
         Some(value)
     }
 
-    pub fn insert<'g, K>(&'g self, key: K, value: V, guard: &'g Guard) -> Option<&'g V>
+    pub fn insert<'g, K>(&self, key: K, value: V, guard: &'g Guard) -> Option<&'g V>
     where
         K: IntoIterator<Item = S>,
     {
@@ -97,7 +97,7 @@ where
         }
     }
 
-    pub fn remove<'a, 'g, Q, K>(&'g self, key: K, guard: &'g Guard) -> Option<(&'g V, bool)>
+    pub fn remove<'a, 'g, Q, K>(&self, key: K, guard: &'g Guard) -> Option<(&'g V, bool)>
     where
         K: IntoIterator<Item = &'a Q>,
         S: Borrow<Q>,
@@ -206,12 +206,12 @@ where
         Box::new(chain)
     }
 
-    // fn value<'g>(&'g self, guard: &'g Guard) -> Option<&'g V> {
+    // fn value<'g>(&self, guard: &'g Guard) -> Option<&'g V> {
     //     let shared = self.value.load_consume(guard);
     //     unsafe { shared.as_ref() }
     // }
 
-    fn set_value<'g>(&'g self, new_value: V, guard: &'g Guard) -> Option<&'g V> {
+    fn set_value<'g>(&self, new_value: V, guard: &'g Guard) -> Option<&'g V> {
         let new_value = Owned::new(new_value);
         let orig_shared = self.value.swap(new_value, AcqRel, guard);
         unsafe { orig_shared.as_ref() }

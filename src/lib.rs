@@ -2,42 +2,52 @@ mod error;
 pub use error::*;
 
 mod node;
-mod utils;
 
 use crate::node::Node;
 use crossbeam::epoch::{self, Atomic, Guard, Owned, Shared};
 use error::Error;
 use std::borrow::Borrow;
-use std::hash::Hash;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
 use std::sync::atomic::Ordering::*;
 
 #[derive(Debug)]
-pub struct Trie<S, V>
-where
-    S: Eq + Hash,
-{
-    root: Atomic<Node<S, V>>,
+pub struct Trie<S, V, H = RandomState> {
+    root: Atomic<Node<S, V, H>>,
+    hash_builder: H,
 }
 
-impl<S, V> Trie<S, V>
+impl<S, V, H> Trie<S, V, H>
+where
+    S: Eq + Hash,
+    H: BuildHasher + Clone,
+{
+    pub fn with_hasher(hash_builder: H) -> Self {
+        Self {
+            root: Atomic::null(),
+            hash_builder,
+        }
+    }
+
+    pub fn pin(&self) -> GuardedTrie<'_, S, V, H> {
+        GuardedTrie {
+            guard: epoch::pin(),
+            root: &self.root,
+            hash_builder: &self.hash_builder,
+        }
+    }
+}
+
+impl<S, V> Trie<S, V, RandomState>
 where
     S: Eq + Hash,
 {
     pub fn new() -> Self {
-        Self {
-            root: Atomic::null(),
-        }
-    }
-
-    pub fn pin(&self) -> GuardedTrie<'_, S, V> {
-        GuardedTrie {
-            guard: epoch::pin(),
-            root: &self.root,
-        }
+        Self::with_hasher(RandomState::default())
     }
 }
 
-impl<S, V> Default for Trie<S, V>
+impl<S, V> Default for Trie<S, V, RandomState>
 where
     S: Eq + Hash,
 {
@@ -47,17 +57,16 @@ where
 }
 
 #[derive(Debug)]
-pub struct GuardedTrie<'g, S, V>
-where
-    S: Eq + Hash,
-{
+pub struct GuardedTrie<'g, S, V, H> {
     guard: Guard,
-    root: &'g Atomic<Node<S, V>>,
+    root: &'g Atomic<Node<S, V, H>>,
+    hash_builder: &'g H,
 }
 
-impl<'g, S, V> GuardedTrie<'g, S, V>
+impl<'g, S, V, H> GuardedTrie<'g, S, V, H>
 where
     S: Eq + Hash,
+    H: BuildHasher + Clone,
 {
     pub fn get<'a, Q, K>(&self, key: K) -> Option<&V>
     where
@@ -65,7 +74,7 @@ where
         S: Borrow<Q>,
         Q: Hash + Eq + 'a,
     {
-        self.root()?.get(key, &self.guard)
+        self.root()?.get(key, self)
     }
 
     pub fn insert<K>(&self, key: K, value: V) -> Option<&V>
@@ -86,7 +95,7 @@ where
     where
         K: IntoIterator<Item = S>,
     {
-        self.get_or_create_root().insert(key, value, &self.guard)
+        self.get_or_create_root().insert(key, value, self)
     }
 
     pub fn remove<'a, Q, K>(&self, key: K) -> Option<&V>
@@ -110,10 +119,7 @@ where
         S: Borrow<Q>,
         Q: Hash + Eq + 'a,
     {
-        let (value, is_child_removed) = self
-            .root()
-            .ok_or(Error::NotFound)?
-            .remove(key, &self.guard)?;
+        let (value, is_child_removed) = self.root().ok_or(Error::NotFound)?.remove(key, self)?;
 
         if is_child_removed {
             self.root.store(Shared::null(), Release);
@@ -123,19 +129,15 @@ where
     }
 
     pub fn iter(&'g self) -> Box<dyn Iterator<Item = &'g V> + 'g> {
-        Box::new(
-            self.root()
-                .into_iter()
-                .flat_map(|root| root.iter(&self.guard)),
-        )
+        Box::new(self.root().into_iter().flat_map(|root| root.iter(self)))
     }
 
-    fn root(&self) -> Option<&Node<S, V>> {
+    fn root(&self) -> Option<&Node<S, V, H>> {
         let shared = self.root.load_consume(&self.guard);
         unsafe { shared.as_ref() }
     }
 
-    fn get_or_create_root(&self) -> &Node<S, V> {
+    fn get_or_create_root(&self) -> &Node<S, V, H> {
         match self.root() {
             Some(root) => root,
             None => {

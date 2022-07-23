@@ -1,28 +1,28 @@
+use crate::{error::Error, GuardedTrie};
 use crossbeam::epoch::{Atomic, Guard, Owned, Shared};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use std::borrow::Borrow;
-use std::hash::Hash;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
 use std::iter;
 use std::sync::atomic::Ordering::*;
 use std::sync::RwLock;
+use std::thread::available_parallelism;
 
-use crate::{
-    error::Error,
-    utils::{new_map, Map},
-};
+type ChildMap<S, V, H = RandomState> = DashMap<S, Atomic<Node<S, V, H>>, H>;
 
 #[derive(Debug)]
-pub(crate) struct Node<S, V>
-where
-    S: Eq + Hash,
-{
-    pub(crate) children: Atomic<Map<S, Atomic<Node<S, V>>>>,
+pub(crate) struct Node<S, V, H> {
+    pub(crate) children: Atomic<ChildMap<S, V, H>>,
     pub(crate) value: Atomic<V>,
     pub(crate) is_deleted: RwLock<bool>,
 }
 
-impl<S, V> Node<S, V>
+impl<S, V, H> Node<S, V, H>
 where
     S: Eq + Hash,
+    H: BuildHasher + Clone,
 {
     pub fn new() -> Self {
         Self {
@@ -32,13 +32,14 @@ where
         }
     }
 
-    pub fn get<'a, 'g, Q, K>(&self, key: K, guard: &'g Guard) -> Option<&'g V>
+    pub fn get<'a, 'g, Q, K>(&self, key: K, trie: &'g GuardedTrie<'g, S, V, H>) -> Option<&'g V>
     where
         K: IntoIterator<Item = &'a Q>,
         S: Borrow<Q>,
         Q: Hash + Eq + 'a,
     {
         let mut key = key.into_iter();
+        let guard = &trie.guard;
 
         // Get the value
         let value = match key.next() {
@@ -53,7 +54,7 @@ where
                     let atomic = entry.value();
                     load_atomic(atomic, guard)?
                 };
-                child_node.get(key, guard)?
+                child_node.get(key, trie)?
             }
             None => {
                 let is_deleted = self.is_deleted.read().unwrap();
@@ -68,11 +69,17 @@ where
         Some(value)
     }
 
-    pub fn insert<'g, K>(&self, key: K, value: V, guard: &'g Guard) -> Result<&'g V, Error>
+    pub fn insert<'g, K>(
+        &self,
+        key: K,
+        value: V,
+        trie: &'g GuardedTrie<'g, S, V, H>,
+    ) -> Result<&'g V, Error>
     where
         K: IntoIterator<Item = S>,
     {
         let mut key = key.into_iter();
+        let guard = &trie.guard;
 
         match key.next() {
             Some(seg) => {
@@ -82,14 +89,14 @@ where
                         return Err(Error::Retry);
                     }
                     let entry = self
-                        .get_or_create_children(guard)
+                        .get_or_create_children(trie)
                         .entry(seg)
                         .or_insert_with(|| Atomic::new(Node::new()));
                     let atomic = entry.value();
                     load_atomic(atomic, guard).ok_or(Error::NotFound)?
                 };
 
-                child_node.insert(key, value, guard)
+                child_node.insert(key, value, trie)
             }
             None => {
                 let is_deleted = self.is_deleted.read().unwrap();
@@ -101,13 +108,18 @@ where
         }
     }
 
-    pub fn remove<'a, 'g, Q, K>(&self, key: K, guard: &'g Guard) -> Result<(&'g V, bool), Error>
+    pub fn remove<'a, 'g, Q, K>(
+        &self,
+        key: K,
+        trie: &'g GuardedTrie<'g, S, V, H>,
+    ) -> Result<(&'g V, bool), Error>
     where
         K: IntoIterator<Item = &'a Q>,
         S: Borrow<Q>,
         Q: Hash + Eq + 'a,
     {
         let mut key = key.into_iter();
+        let guard = &trie.guard;
 
         // Get the value
         let (value, is_self_deleted) = match key.next() {
@@ -132,7 +144,7 @@ where
                 // Delete the value in descendents. During the
                 // process, the hash map entry for the child may be
                 // set to null.
-                let (value, is_child_deleted) = child_node.remove(key, guard)?;
+                let (value, is_child_deleted) = child_node.remove(key, trie)?;
 
                 let is_self_deleted = {
                     let mut is_deleted = self.is_deleted.write().unwrap();
@@ -204,7 +216,11 @@ where
         Ok((value, is_self_deleted))
     }
 
-    pub fn iter<'g>(&'g self, guard: &'g Guard) -> Box<dyn Iterator<Item = &'g V> + 'g> {
+    pub fn iter<'g>(
+        &'g self,
+        trie: &'g GuardedTrie<'g, S, V, H>,
+    ) -> Box<dyn Iterator<Item = &'g V> + 'g> {
+        let guard = &trie.guard;
         let curr_value = iter::once_with(|| self.value(guard)).flatten();
 
         let child_values = self
@@ -215,7 +231,7 @@ where
                 let child = entry.value();
                 let shared = child.load_consume(guard);
                 let ref_ = unsafe { shared.deref() };
-                ref_.iter(guard)
+                ref_.iter(trie)
             });
 
         let chain = curr_value.into_iter().chain(child_values);
@@ -238,16 +254,21 @@ where
         unsafe { orig_shared.as_ref() }
     }
 
-    fn children<'g>(&self, guard: &'g Guard) -> Option<&'g Map<S, Atomic<Node<S, V>>>> {
+    fn children<'g>(&self, guard: &'g Guard) -> Option<&'g ChildMap<S, V, H>> {
         let shared = self.children.load_consume(guard);
         unsafe { shared.as_ref() }
     }
 
-    fn get_or_create_children<'g>(&self, guard: &'g Guard) -> &'g Map<S, Atomic<Node<S, V>>> {
+    fn get_or_create_children<'g>(
+        &self,
+        trie: &'g GuardedTrie<'g, S, V, H>,
+    ) -> &'g ChildMap<S, V, H> {
+        let guard = &trie.guard;
+
         match self.children(guard) {
             Some(children) => children,
             None => {
-                let map = Owned::new(new_map());
+                let map = Owned::new(new_map(trie.hash_builder));
                 let result =
                     self.children
                         .compare_exchange(Shared::null(), map, AcqRel, Acquire, guard);
@@ -261,9 +282,10 @@ where
     }
 }
 
-impl<S, V> Default for Node<S, V>
+impl<S, V, H> Default for Node<S, V, H>
 where
     S: Eq + Hash,
+    H: BuildHasher + Clone,
 {
     fn default() -> Self {
         Self::new()
@@ -272,4 +294,19 @@ where
 
 fn load_atomic<'g, T>(atomic: &Atomic<T>, guard: &'g Guard) -> Option<&'g T> {
     unsafe { atomic.load_consume(guard).as_ref() }
+}
+
+fn new_map<K, V, H>(build_hasher: &H) -> DashMap<K, V, H>
+where
+    K: Hash + Eq,
+    H: BuildHasher + Clone,
+{
+    static DEFAULT_SHARD_AMOUNT: Lazy<usize> =
+        Lazy::new(|| (available_parallelism().map_or(1, usize::from) * 4).next_power_of_two());
+
+    DashMap::with_capacity_and_hasher_and_shard_amount(
+        0,
+        build_hasher.clone(),
+        *DEFAULT_SHARD_AMOUNT,
+    )
 }

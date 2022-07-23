@@ -155,7 +155,7 @@ fn race_insert_get_test() {
         .collect();
 
     let inserter = spawn(move || {
-        sleep(Duration::from_micros(100));
+        sleep(Duration::from_micros(1));
         trie.pin().insert(key, value);
     });
 

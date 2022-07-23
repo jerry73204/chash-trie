@@ -111,12 +111,57 @@ fn overwrite_test() {
         // 15ms
         assert_eq!(*value, first_value);
 
-        drop(pinned);
-        let pinned = trie.pinned();
-        let value = pinned.get(&key).unwrap();
+        drop(pin);
+        let pin = trie.pin();
+        let value = pin.get(&key).unwrap();
         assert_eq!(*value, second_value);
     });
 
     writer.join().unwrap();
     reader.join().unwrap();
+}
+
+#[test]
+fn race_insert_get_test() {
+    let trie = Arc::new(Trie::new());
+    let mut rng = rand::thread_rng();
+
+    let key = {
+        let mut key = [0u32; 32];
+        rng.fill(&mut key);
+        key
+    };
+    let value: u64 = rng.gen();
+
+    let getters: Vec<_> = (0..(*NUM_THREADS - 1))
+        .map(|_| {
+            let trie = trie.clone();
+
+            spawn(move || {
+                let mut success = false;
+
+                for _ in 0..10000 {
+                    let curr_value = trie.pin().get(&key).cloned();
+                    if let Some(curr_value) = curr_value {
+                        assert!(curr_value == value);
+                        success = true;
+                        break;
+                    }
+                }
+
+                assert!(success);
+            })
+        })
+        .collect();
+
+    let inserter = spawn(move || {
+        sleep(Duration::from_micros(100));
+        trie.pin().insert(key, value);
+    });
+
+    inserter.join().unwrap();
+
+    for handle in getters {
+        handle.join().unwrap();
+    }
 }

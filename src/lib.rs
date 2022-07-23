@@ -1,8 +1,12 @@
+mod error;
+pub use error::*;
+
 mod node;
 mod utils;
 
 use crate::node::Node;
 use crossbeam::epoch::{self, Guard};
+use error::Error;
 use std::borrow::Borrow;
 use std::hash::Hash;
 
@@ -63,6 +67,20 @@ where
 
     pub fn insert<K>(&self, key: K, value: V) -> Option<&V>
     where
+        K: IntoIterator<Item = S> + Clone,
+        V: Clone,
+    {
+        loop {
+            match self.try_insert(key.clone(), value.clone()) {
+                Ok(value) => break Some(value),
+                Err(Error::NotFound) => break None,
+                Err(Error::Retry) => (),
+            }
+        }
+    }
+
+    pub fn try_insert<K>(&self, key: K, value: V) -> Result<&V, Error>
+    where
         K: IntoIterator<Item = S>,
     {
         self.trie.root.insert(key, value, &self.guard)
@@ -70,12 +88,31 @@ where
 
     pub fn remove<'a, Q, K>(&self, key: K) -> Option<&V>
     where
+        K: IntoIterator<Item = &'a Q> + Clone,
+        S: Borrow<Q>,
+        Q: Hash + Eq + 'a,
+    {
+        loop {
+            match self.try_remove(key.clone()) {
+                Ok(value) => break Some(value),
+                Err(Error::NotFound) => break None,
+                Err(Error::Retry) => {}
+            }
+        }
+    }
+
+    pub fn try_remove<'a, Q, K>(&self, key: K) -> Result<&V, Error>
+    where
         K: IntoIterator<Item = &'a Q>,
         S: Borrow<Q>,
         Q: Hash + Eq + 'a,
     {
-        let (value, _) = self.trie.root.remove(key, &self.guard)?;
-        Some(value)
+        let (value, is_child_removed) = self.trie.root.remove(key, &self.guard)?;
+        if is_child_removed {
+            todo!();
+        }
+
+        Ok(value)
     }
 
     pub fn iter(&'g self) -> Box<dyn Iterator<Item = &'g V> + 'g> {

@@ -5,7 +5,10 @@ use std::iter;
 use std::sync::atomic::Ordering::*;
 use std::sync::RwLock;
 
-use crate::utils::{new_map, Map};
+use crate::{
+    error::Error,
+    utils::{new_map, Map},
+};
 
 #[derive(Debug)]
 pub(crate) struct Node<S, V>
@@ -65,7 +68,7 @@ where
         Some(value)
     }
 
-    pub fn insert<'g, K>(&self, key: K, value: V, guard: &'g Guard) -> Option<&'g V>
+    pub fn insert<'g, K>(&self, key: K, value: V, guard: &'g Guard) -> Result<&'g V, Error>
     where
         K: IntoIterator<Item = S>,
     {
@@ -73,31 +76,32 @@ where
 
         match key.next() {
             Some(seg) => {
-                let ref_ = {
+                let child_node = {
                     let is_deleted = self.is_deleted.read().unwrap();
                     if *is_deleted {
-                        todo!("retry");
+                        return Err(Error::Retry);
                     }
                     let entry = self
                         .get_or_create_children(guard)
                         .entry(seg)
                         .or_insert_with(|| Atomic::new(Node::new()));
                     let atomic = entry.value();
-                    load_atomic(atomic, guard)?
+                    load_atomic(atomic, guard).ok_or(Error::NotFound)?
                 };
-                ref_.insert(key, value, guard)
+
+                child_node.insert(key, value, guard)
             }
             None => {
                 let is_deleted = self.is_deleted.read().unwrap();
                 if *is_deleted {
-                    todo!("retry");
+                    return Err(Error::Retry);
                 }
-                self.set_value(value, guard)
+                self.set_value(value, guard).ok_or(Error::NotFound)
             }
         }
     }
 
-    pub fn remove<'a, 'g, Q, K>(&self, key: K, guard: &'g Guard) -> Option<(&'g V, bool)>
+    pub fn remove<'a, 'g, Q, K>(&self, key: K, guard: &'g Guard) -> Result<(&'g V, bool), Error>
     where
         K: IntoIterator<Item = &'a Q>,
         S: Borrow<Q>,
@@ -112,14 +116,18 @@ where
                 let child_shared = {
                     let is_deleted = self.is_deleted.read().unwrap();
                     if *is_deleted {
-                        todo!("retry");
+                        return Err(Error::Retry);
                     }
 
-                    let entry = self.children(guard)?.get(seg)?;
+                    let entry = self
+                        .children(guard)
+                        .ok_or(Error::NotFound)?
+                        .get(seg)
+                        .ok_or(Error::NotFound)?;
                     let atomic = entry.value();
                     atomic.load_consume(guard)
                 };
-                let child_node = unsafe { child_shared.as_ref() }?;
+                let child_node = unsafe { child_shared.as_ref().ok_or(Error::NotFound)? };
 
                 // Delete the value in descendents. During the
                 // process, the hash map entry for the child may be
@@ -131,7 +139,7 @@ where
 
                     // Check if some deleter else removes this node already.
                     if *is_deleted {
-                        return Some((value, false));
+                        return Ok((value, false));
                     }
 
                     let is_self_deleted = match self.children(guard) {
@@ -171,11 +179,11 @@ where
 
                 // Check if some deleter else removes this node already.
                 if *is_deleted {
-                    return None;
+                    return Err(Error::NotFound);
                 }
 
                 // Get and unset the value.
-                let value = self.take_value(guard)?;
+                let value = self.take_value(guard).ok_or(Error::NotFound)?;
 
                 // If this node has no children, ,mark this node
                 // deleted and set the entry on parent to this node to
@@ -193,7 +201,7 @@ where
             }
         };
 
-        Some((value, is_self_deleted))
+        Ok((value, is_self_deleted))
     }
 
     pub fn iter<'g>(&'g self, guard: &'g Guard) -> Box<dyn Iterator<Item = &'g V> + 'g> {

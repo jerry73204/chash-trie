@@ -12,7 +12,7 @@ pub(crate) struct Node<S, V>
 where
     S: Eq + Hash,
 {
-    pub(crate) children: Map<S, Atomic<Node<S, V>>>,
+    pub(crate) children: Atomic<Map<S, Atomic<Node<S, V>>>>,
     pub(crate) value: Atomic<V>,
     pub(crate) is_deleted: RwLock<bool>,
 }
@@ -23,7 +23,7 @@ where
 {
     pub fn new() -> Self {
         Self {
-            children: new_map(),
+            children: Atomic::null(),
             value: Atomic::null(),
             is_deleted: RwLock::new(false),
         }
@@ -46,7 +46,7 @@ where
                         return None;
                     }
 
-                    let entry = self.children.get(seg)?;
+                    let entry = self.children(guard)?.get(seg)?;
                     let atomic = entry.value();
                     load_atomic(atomic, guard)?
                 };
@@ -58,7 +58,7 @@ where
                     return None;
                 }
 
-                load_atomic(&self.value, guard)?
+                self.value(guard)?
             }
         };
 
@@ -79,7 +79,7 @@ where
                         todo!("retry");
                     }
                     let entry = self
-                        .children
+                        .get_or_create_children(guard)
                         .entry(seg)
                         .or_insert_with(|| Atomic::new(Node::new()));
                     let atomic = entry.value();
@@ -115,7 +115,7 @@ where
                         todo!("retry");
                     }
 
-                    let entry = self.children.get(seg)?;
+                    let entry = self.children(guard)?.get(seg)?;
                     let atomic = entry.value();
                     atomic.load_consume(guard)
                 };
@@ -134,27 +134,28 @@ where
                         return Some((value, false));
                     }
 
-                    // If the child was deleted, try to remove the
-                    // corresponding entry if the entry was not
-                    // altered.
-                    if is_child_deleted {
-                        self.children.remove_if(seg, |_, atomic| {
-                            let result = atomic.compare_exchange(
-                                child_shared,
-                                Shared::null(),
-                                AcqRel,
-                                Release,
-                                guard,
-                            );
-                            result.is_ok()
-                        });
-                    }
+                    let is_self_deleted = match self.children(guard) {
+                        Some(children) => {
+                            // If the child was deleted, try to remove the
+                            // corresponding entry if the entry was not
+                            // altered.
+                            if is_child_deleted {
+                                children.remove_if(seg, |_, atomic| {
+                                    let result = atomic.compare_exchange(
+                                        child_shared,
+                                        Shared::null(),
+                                        AcqRel,
+                                        Release,
+                                        guard,
+                                    );
+                                    result.is_ok()
+                                });
+                            }
 
-                    // If the node has no children and the value is
-                    // unset, mark his node deleted and delete the
-                    // entry on parent to this node.
-                    let is_self_deleted =
-                        self.children.is_empty() && self.value.load_consume(guard).is_null();
+                            children.is_empty() && self.value.load_consume(guard).is_null()
+                        }
+                        None => self.value.load_consume(guard).is_null(),
+                    };
 
                     if is_self_deleted {
                         *is_deleted = true;
@@ -174,14 +175,17 @@ where
                 }
 
                 // Get and unset the value.
-                let value = load_atomic(&self.value, guard)?;
-                self.value.store(Shared::null(), Release);
+                let value = self.take_value(guard)?;
 
                 // If this node has no children, ,mark this node
                 // deleted and set the entry on parent to this node to
                 // null.
-                let is_self_deleted = self.children.is_empty();
-                if self.children.is_empty() {
+                let is_self_deleted = match self.children(guard) {
+                    Some(children) => children.is_empty(),
+                    None => true,
+                };
+
+                if is_self_deleted {
                     *is_deleted = true;
                 }
 
@@ -193,28 +197,59 @@ where
     }
 
     pub fn iter<'g>(&'g self, guard: &'g Guard) -> Box<dyn Iterator<Item = &'g V> + 'g> {
-        let curr_value = iter::once_with(|| load_atomic(&self.value, guard)).flatten();
+        let curr_value = iter::once_with(|| self.value(guard)).flatten();
 
-        let child_values = self.children.iter().flat_map(|entry| {
-            let child = entry.value();
-            let shared = child.load_consume(guard);
-            let ref_ = unsafe { shared.deref() };
-            ref_.iter(guard)
-        });
+        let child_values = self
+            .children(guard)
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| {
+                let child = entry.value();
+                let shared = child.load_consume(guard);
+                let ref_ = unsafe { shared.deref() };
+                ref_.iter(guard)
+            });
 
         let chain = curr_value.into_iter().chain(child_values);
         Box::new(chain)
     }
 
-    // fn value<'g>(&self, guard: &'g Guard) -> Option<&'g V> {
-    //     let shared = self.value.load_consume(guard);
-    //     unsafe { shared.as_ref() }
-    // }
+    fn value<'g>(&self, guard: &'g Guard) -> Option<&'g V> {
+        let shared = self.value.load_consume(guard);
+        unsafe { shared.as_ref() }
+    }
+
+    fn take_value<'g>(&self, guard: &'g Guard) -> Option<&'g V> {
+        let shared = self.value.swap(Shared::null(), AcqRel, guard);
+        unsafe { shared.as_ref() }
+    }
 
     fn set_value<'g>(&self, new_value: V, guard: &'g Guard) -> Option<&'g V> {
         let new_value = Owned::new(new_value);
         let orig_shared = self.value.swap(new_value, AcqRel, guard);
         unsafe { orig_shared.as_ref() }
+    }
+
+    fn children<'g>(&self, guard: &'g Guard) -> Option<&'g Map<S, Atomic<Node<S, V>>>> {
+        let shared = self.children.load_consume(guard);
+        unsafe { shared.as_ref() }
+    }
+
+    fn get_or_create_children<'g>(&self, guard: &'g Guard) -> &'g Map<S, Atomic<Node<S, V>>> {
+        match self.children(guard) {
+            Some(children) => children,
+            None => {
+                let map = Owned::new(new_map());
+                let result =
+                    self.children
+                        .compare_exchange(Shared::null(), map, AcqRel, Acquire, guard);
+                let shared = match result {
+                    Ok(curr) => curr,
+                    Err(error) => error.current,
+                };
+                unsafe { shared.deref() }
+            }
+        }
     }
 }
 

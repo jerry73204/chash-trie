@@ -140,7 +140,7 @@ fn race_insert_get_test() {
             spawn(move || {
                 let mut success = false;
 
-                for _ in 0..10000 {
+                for _ in 0..100000 {
                     let curr_value = trie.pin().get(&key).cloned();
                     if let Some(curr_value) = curr_value {
                         assert!(curr_value == value);

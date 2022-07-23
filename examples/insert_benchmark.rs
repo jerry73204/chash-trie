@@ -35,7 +35,7 @@ fn run_fast_trie(num_rounds: usize, num_threads: usize) {
             let trie = trie.clone();
 
             spawn(move || {
-                let trie = trie.pinned();
+                let trie = trie.pin();
 
                 (0..num_rounds).for_each(|round_id| {
                     trie.insert([worker_id, round_id], 0);

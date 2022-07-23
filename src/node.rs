@@ -69,6 +69,70 @@ where
         Some(value)
     }
 
+    pub fn child<'a, 'g, Q>(
+        &self,
+        seg: &Q,
+        trie: &'g GuardedTrie<'g, S, V, H>,
+    ) -> Option<&'g Node<S, V, H>>
+    where
+        S: Borrow<Q>,
+        Q: Hash + Eq + 'a,
+    {
+        let guard = &trie.guard;
+
+        let is_deleted = self.is_deleted.read().unwrap();
+        if *is_deleted {
+            return None;
+        }
+
+        let entry = self.children(guard)?.get(seg)?;
+        let atomic = entry.value();
+        let child_node = load_atomic(atomic, guard)?;
+
+        Some(child_node)
+    }
+
+    pub fn find<'a, 'g, Q, K>(
+        &'g self,
+        key: K,
+        trie: &'g GuardedTrie<'g, S, V, H>,
+    ) -> Option<&'g Node<S, V, H>>
+    where
+        K: IntoIterator<Item = &'a Q>,
+        S: Borrow<Q>,
+        Q: Hash + Eq + 'a,
+    {
+        let mut key = key.into_iter();
+        let guard = &trie.guard;
+
+        // Get the value
+        let node = match key.next() {
+            Some(seg) => {
+                let child_node = {
+                    let is_deleted = self.is_deleted.read().unwrap();
+                    if *is_deleted {
+                        return None;
+                    }
+
+                    let entry = self.children(guard)?.get(seg)?;
+                    let atomic = entry.value();
+                    load_atomic(atomic, guard)?
+                };
+                child_node.find(key, trie)?
+            }
+            None => {
+                let is_deleted = self.is_deleted.read().unwrap();
+                if *is_deleted {
+                    return None;
+                }
+
+                self
+            }
+        };
+
+        Some(node)
+    }
+
     pub fn insert<'g, K>(
         &self,
         key: K,
@@ -238,6 +302,10 @@ where
         Box::new(chain)
     }
 
+    pub fn is_removed(&self) -> bool {
+        *self.is_deleted.read().unwrap()
+    }
+
     fn value<'g>(&self, guard: &'g Guard) -> Option<&'g V> {
         let shared = self.value.load_consume(guard);
         unsafe { shared.as_ref() }
@@ -268,7 +336,7 @@ where
         match self.children(guard) {
             Some(children) => children,
             None => {
-                let map = Owned::new(new_map(trie.hash_builder));
+                let map = Owned::new(new_map(&trie.trie.hash_builder));
                 let result =
                     self.children
                         .compare_exchange(Shared::null(), map, AcqRel, Acquire, guard);

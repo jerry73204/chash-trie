@@ -1,4 +1,6 @@
+mod entry;
 mod error;
+use entry::Entry;
 pub use error::*;
 
 mod node;
@@ -32,8 +34,7 @@ where
     pub fn pin(&self) -> GuardedTrie<'_, S, V, H> {
         GuardedTrie {
             guard: epoch::pin(),
-            root: &self.root,
-            hash_builder: &self.hash_builder,
+            trie: self,
         }
     }
 }
@@ -59,8 +60,7 @@ where
 #[derive(Debug)]
 pub struct GuardedTrie<'g, S, V, H> {
     guard: Guard,
-    root: &'g Atomic<Node<S, V, H>>,
-    hash_builder: &'g H,
+    trie: &'g Trie<S, V, H>,
 }
 
 impl<'g, S, V, H> GuardedTrie<'g, S, V, H>
@@ -122,7 +122,7 @@ where
         let (value, is_child_removed) = self.root().ok_or(Error::NotFound)?.remove(key, self)?;
 
         if is_child_removed {
-            self.root.store(Shared::null(), Release);
+            self.trie.root.store(Shared::null(), Release);
         }
 
         Ok(value)
@@ -132,8 +132,18 @@ where
         Box::new(self.root().into_iter().flat_map(|root| root.iter(self)))
     }
 
+    pub fn entry<'a, Q, K>(&'g self, key: K) -> Option<Entry<'g, S, V, H>>
+    where
+        K: IntoIterator<Item = &'a Q>,
+        S: Borrow<Q>,
+        Q: Hash + Eq + 'a,
+    {
+        let node = self.root()?.find(key, self)?;
+        Some(Entry { node, trie: self })
+    }
+
     fn root(&self) -> Option<&Node<S, V, H>> {
-        let shared = self.root.load_consume(&self.guard);
+        let shared = self.trie.root.load_consume(&self.guard);
         unsafe { shared.as_ref() }
     }
 
@@ -142,7 +152,7 @@ where
             Some(root) => root,
             None => {
                 let new_shared = Owned::new(Node::new()).into_shared(&self.guard);
-                let result = self.root.compare_exchange(
+                let result = self.trie.root.compare_exchange(
                     Shared::null(),
                     new_shared,
                     AcqRel,

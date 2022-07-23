@@ -1,5 +1,5 @@
+use chash_trie::Trie;
 use clap::Parser;
-use fast_trie::Trie;
 use rand::prelude::*;
 use rayon::prelude::*;
 use std::{

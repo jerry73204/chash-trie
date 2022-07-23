@@ -21,12 +21,12 @@ fn main() {
     println!("trie_rs {:?}", since.elapsed());
 
     let since = Instant::now();
-    run_fast_trie(opts.num_rounds, opts.num_threads);
-    println!("fast-trie {:?}", since.elapsed());
+    run_chash_trie(opts.num_rounds, opts.num_threads);
+    println!("chash-trie {:?}", since.elapsed());
 }
 
-fn run_fast_trie(num_rounds: usize, num_threads: usize) {
-    use fast_trie::Trie;
+fn run_chash_trie(num_rounds: usize, num_threads: usize) {
+    use chash_trie::Trie;
 
     let trie = Arc::new(Trie::new());
 

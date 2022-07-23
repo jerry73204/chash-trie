@@ -1,5 +1,5 @@
 [package]
-name = "fast-trie"
+name = "chash-trie"
 version = "0.1.0"
 edition = "2021"
 

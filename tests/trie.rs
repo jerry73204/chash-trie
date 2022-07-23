@@ -1,4 +1,4 @@
-use fast_trie::Trie;
+use chash_trie::Trie;
 use once_cell::sync::Lazy;
 use rand::prelude::*;
 use std::{

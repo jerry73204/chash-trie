@@ -74,7 +74,8 @@ where
         S: Borrow<Q>,
         Q: Hash + Eq + 'a,
     {
-        self.trie.root.remove(key, None, &self.guard)
+        let (value, _) = self.trie.root.remove(key, &self.guard)?;
+        Some(value)
     }
 
     pub fn iter(&'g self) -> Box<dyn Iterator<Item = &'g V> + 'g> {

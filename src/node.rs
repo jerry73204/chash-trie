@@ -97,12 +97,7 @@ where
         }
     }
 
-    pub fn remove<'a, 'g, Q, K>(
-        &'g self,
-        key: K,
-        parent: Option<(&Self, &Q, Shared<'g, Self>)>,
-        guard: &'g Guard,
-    ) -> Option<&'g V>
+    pub fn remove<'a, 'g, Q, K>(&'g self, key: K, guard: &'g Guard) -> Option<(&'g V, bool)>
     where
         K: IntoIterator<Item = &'a Q>,
         S: Borrow<Q>,
@@ -111,10 +106,10 @@ where
         let mut key = key.into_iter();
 
         // Get the value
-        let value = match key.next() {
+        let (value, is_self_deleted) = match key.next() {
             Some(seg) => {
                 // Find the related child
-                let shared = {
+                let child_shared = {
                     let is_deleted = self.is_deleted.read().unwrap();
                     if *is_deleted {
                         todo!("retry");
@@ -124,49 +119,51 @@ where
                     let atomic = entry.value();
                     atomic.load_consume(guard)
                 };
-                let child_node = unsafe { shared.as_ref() }?;
+                let child_node = unsafe { child_shared.as_ref() }?;
 
                 // Delete the value in descendents. During the
                 // process, the hash map entry for the child may be
                 // set to null.
-                let value = child_node.remove(key, Some((self, seg, shared)), guard)?;
+                let (value, is_child_deleted) = child_node.remove(key, guard)?;
 
-                {
+                let is_self_deleted = {
                     let mut is_deleted = self.is_deleted.write().unwrap();
 
                     // Check if some deleter else removes this node already.
                     if *is_deleted {
-                        return Some(value);
+                        return Some((value, false));
                     }
 
-                    // If the entry is set to null, remove it.
-                    if let Some(entry) = self.children.get(seg) {
-                        if load_atomic(entry.value(), guard).is_none() {
-                            self.children.remove(seg);
-                        }
+                    // If the child was deleted, try to remove the
+                    // corresponding entry if the entry was not
+                    // altered.
+                    if is_child_deleted {
+                        self.children.remove_if(seg, |_, atomic| {
+                            let result = atomic.compare_exchange(
+                                child_shared,
+                                Shared::null(),
+                                AcqRel,
+                                Release,
+                                guard,
+                            );
+                            result.is_ok()
+                        });
                     }
 
                     // If the node has no children and the value is
                     // unset, mark his node deleted and delete the
                     // entry on parent to this node.
-                    if self.children.is_empty() && self.value.load_consume(guard).is_null() {
+                    let is_self_deleted =
+                        self.children.is_empty() && self.value.load_consume(guard).is_null();
+
+                    if is_self_deleted {
                         *is_deleted = true;
-
-                        if let Some((parent, prev_seg, expect_value)) = parent {
-                            if let Some(atomic) = parent.children.get(prev_seg) {
-                                let _ = atomic.compare_exchange(
-                                    expect_value,
-                                    Shared::null(),
-                                    AcqRel,
-                                    Acquire,
-                                    guard,
-                                );
-                            }
-                        }
                     }
-                }
 
-                value
+                    is_self_deleted
+                };
+
+                (value, is_self_deleted)
             }
             None => {
                 let mut is_deleted = self.is_deleted.write().unwrap();
@@ -183,26 +180,16 @@ where
                 // If this node has no children, ,mark this node
                 // deleted and set the entry on parent to this node to
                 // null.
+                let is_self_deleted = self.children.is_empty();
                 if self.children.is_empty() {
                     *is_deleted = true;
-
-                    if let Some((parent, prev_seg, expect_value)) = parent {
-                        if let Some(atomic) = parent.children.get(prev_seg) {
-                            let _ = atomic.compare_exchange(
-                                expect_value,
-                                Shared::null(),
-                                AcqRel,
-                                Acquire,
-                                guard,
-                            );
-                        }
-                    }
                 }
-                value
+
+                (value, is_self_deleted)
             }
         };
 
-        Some(value)
+        Some((value, is_self_deleted))
     }
 
     pub fn iter<'g>(&'g self, guard: &'g Guard) -> Box<dyn Iterator<Item = &'g V> + 'g> {

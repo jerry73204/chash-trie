@@ -74,7 +74,7 @@ where
         S: Borrow<Q>,
         Q: Hash + Eq + 'a,
     {
-        self.root()?.get(key, self)
+        self.root()?.get_at(key, self)
     }
 
     pub fn insert<K>(&self, key: K, value: V) -> Option<&V>
@@ -95,7 +95,7 @@ where
     where
         K: IntoIterator<Item = S>,
     {
-        self.get_or_create_root().insert(key, value, self)
+        self.get_or_create_root().insert_at(key, value, self)
     }
 
     pub fn remove<'a, Q, K>(&self, key: K) -> Option<&V>
@@ -119,7 +119,7 @@ where
         S: Borrow<Q>,
         Q: Hash + Eq + 'a,
     {
-        let (value, is_child_removed) = self.root().ok_or(Error::NotFound)?.remove(key, self)?;
+        let (value, is_child_removed) = self.root().ok_or(Error::NotFound)?.remove_at(key, self)?;
 
         if is_child_removed {
             self.trie.root.store(Shared::null(), Release);

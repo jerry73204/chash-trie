@@ -1,6 +1,7 @@
 use std::borrow::Borrow;
 use std::hash::{BuildHasher, Hash};
 
+use crate::error::Error;
 use crate::node::Node;
 use crate::GuardedTrie;
 
@@ -15,6 +16,14 @@ where
     S: Eq + Hash,
     H: BuildHasher + Clone,
 {
+    pub fn get(&self) -> Option<&'g V> {
+        self.node.get(self.trie)
+    }
+
+    pub fn try_insert(&self, value: V) -> Result<&'g V, Error> {
+        self.node.insert(value, self.trie)
+    }
+
     pub fn child<'a, Q, K>(&self, seg: &Q) -> Option<Entry<'g, S, V, H>>
     where
         S: Borrow<Q>,

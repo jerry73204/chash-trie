@@ -32,7 +32,7 @@ where
         }
     }
 
-    pub fn get<'a, 'g, Q, K>(&self, key: K, trie: &'g GuardedTrie<'g, S, V, H>) -> Option<&'g V>
+    pub fn get_at<'a, 'g, Q, K>(&self, key: K, trie: &'g GuardedTrie<'g, S, V, H>) -> Option<&'g V>
     where
         K: IntoIterator<Item = &'a Q>,
         S: Borrow<Q>,
@@ -54,19 +54,23 @@ where
                     let atomic = entry.value();
                     load_atomic(atomic, guard)?
                 };
-                child_node.get(key, trie)?
+                child_node.get_at(key, trie)?
             }
-            None => {
-                let is_deleted = self.is_deleted.read().unwrap();
-                if *is_deleted {
-                    return None;
-                }
-
-                self.value(guard)?
-            }
+            None => self.get(trie)?,
         };
 
         Some(value)
+    }
+
+    pub fn get<'g>(&self, trie: &'g GuardedTrie<'g, S, V, H>) -> Option<&'g V> {
+        let guard = &trie.guard;
+
+        let is_deleted = self.is_deleted.read().unwrap();
+        if *is_deleted {
+            return None;
+        }
+
+        self.value(guard)
     }
 
     pub fn child<'a, 'g, Q>(
@@ -133,7 +137,7 @@ where
         Some(node)
     }
 
-    pub fn insert<'g, K>(
+    pub fn insert_at<'g, K>(
         &self,
         key: K,
         value: V,
@@ -160,19 +164,22 @@ where
                     load_atomic(atomic, guard).ok_or(Error::NotFound)?
                 };
 
-                child_node.insert(key, value, trie)
+                child_node.insert_at(key, value, trie)
             }
-            None => {
-                let is_deleted = self.is_deleted.read().unwrap();
-                if *is_deleted {
-                    return Err(Error::Retry);
-                }
-                self.set_value(value, guard).ok_or(Error::NotFound)
-            }
+            None => self.insert(value, trie),
         }
     }
 
-    pub fn remove<'a, 'g, Q, K>(
+    pub fn insert<'g>(&self, value: V, trie: &'g GuardedTrie<'g, S, V, H>) -> Result<&'g V, Error> {
+        let guard = &trie.guard;
+        let is_deleted = self.is_deleted.read().unwrap();
+        if *is_deleted {
+            return Err(Error::Retry);
+        }
+        self.set_value(value, guard).ok_or(Error::NotFound)
+    }
+
+    pub fn remove_at<'a, 'g, Q, K>(
         &self,
         key: K,
         trie: &'g GuardedTrie<'g, S, V, H>,
@@ -208,7 +215,7 @@ where
                 // Delete the value in descendents. During the
                 // process, the hash map entry for the child may be
                 // set to null.
-                let (value, is_child_deleted) = child_node.remove(key, trie)?;
+                let (value, is_child_deleted) = child_node.remove_at(key, trie)?;
 
                 let is_self_deleted = {
                     let mut is_deleted = self.is_deleted.write().unwrap();
@@ -250,32 +257,35 @@ where
 
                 (value, is_self_deleted)
             }
-            None => {
-                let mut is_deleted = self.is_deleted.write().unwrap();
-
-                // Check if some deleter else removes this node already.
-                if *is_deleted {
-                    return Err(Error::NotFound);
-                }
-
-                // Get and unset the value.
-                let value = self.take_value(guard).ok_or(Error::NotFound)?;
-
-                // If this node has no children, ,mark this node
-                // deleted and set the entry on parent to this node to
-                // null.
-                let is_self_deleted = match self.children(guard) {
-                    Some(children) => children.is_empty(),
-                    None => true,
-                };
-
-                if is_self_deleted {
-                    *is_deleted = true;
-                }
-
-                (value, is_self_deleted)
-            }
+            None => self.remove(trie)?,
         };
+
+        Ok((value, is_self_deleted))
+    }
+
+    pub fn remove<'g>(&self, trie: &'g GuardedTrie<'g, S, V, H>) -> Result<(&'g V, bool), Error> {
+        let guard = &trie.guard;
+        let mut is_deleted = self.is_deleted.write().unwrap();
+
+        // Check if some deleter else removes this node already.
+        if *is_deleted {
+            return Err(Error::NotFound);
+        }
+
+        // Get and unset the value.
+        let value = self.take_value(guard).ok_or(Error::NotFound)?;
+
+        // If this node has no children, ,mark this node
+        // deleted and set the entry on parent to this node to
+        // null.
+        let is_self_deleted = match self.children(guard) {
+            Some(children) => children.is_empty(),
+            None => true,
+        };
+
+        if is_self_deleted {
+            *is_deleted = true;
+        }
 
         Ok((value, is_self_deleted))
     }
